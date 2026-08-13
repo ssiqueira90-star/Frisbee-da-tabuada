@@ -1,0 +1,644 @@
+<div id="game-container">
+    <div id="ui">
+        <div id="points">Pontos: 0</div>
+        <div id="score">Passes: 0/10</div>
+        <div id="turn">Sua Vez (Azul)</div>
+    </div>
+    <div id="instructions">Deslize para passar! Não demore para arremessar.</div>
+    
+    <!-- Barra Visual do Tempo de Posse do Disco (10s) -->
+    <div id="possession-bar-container">
+        <div id="possession-bar"></div>
+    </div>
+
+    <!-- Modal do Desafio da Tabuada -->
+    <div id="math-overlay" style="display: none;">
+        <div id="math-card">
+            <div id="timer-bar-container"><div id="timer-bar"></div></div>
+            <div id="math-title">ACERTE A TABUADA!</div>
+            <div id="math-question">3 × 4 = ?</div>
+            <div id="math-options"></div>
+            <div id="math-timer-text">Tempo: 5.0s</div>
+        </div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+</div>
+
+<style>
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; touch-action: none; }
+    body { background: #1a1a1a; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+    #game-container { position: relative; width: 100vw; height: 100vh; max-width: 480px; max-height: 854px; background: linear-gradient(to bottom, #74d2e7 0%, #a4e3f0 40%, #f7d488 40%, #e1b15c 100%); overflow: hidden; }
+    canvas { width: 100%; height: 100%; display: block; }
+    #ui { position: absolute; top: 15px; left: 0; width: 100%; display: flex; justify-content: space-between; padding: 0 15px; color: #fff; font-weight: bold; font-size: 15px; text-shadow: 2px 2px 4px rgba(0,0,0,0.6); pointer-events: none; z-index: 5; }
+    #instructions { position: absolute; bottom: 25px; width: 100%; text-align: center; color: #fff; font-size: 15px; font-weight: bold; text-shadow: 1px 1px 3px rgba(0,0,0,0.8); pointer-events: none; z-index: 5; }
+
+    /* Barra de Posse de Bola */
+    #possession-bar-container { position: absolute; top: 42px; left: 15px; right: 15px; height: 6px; background: rgba(0,0,0,0.3); border-radius: 3px; overflow: hidden; z-index: 5; }
+    #possession-bar { width: 100%; height: 100%; background: #f1c40f; transition: width 0.1s linear; }
+
+    /* Overlay da Tabuada */
+    #math-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.75); display: flex; justify-content: center; align-items: center; z-index: 20; }
+    #math-card { background: #2c3e50; border: 3px solid #f1c40f; border-radius: 16px; padding: 20px; width: 85%; max-width: 340px; text-align: center; color: #fff; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+    #math-title { font-size: 13px; font-weight: bold; color: #f1c40f; letter-spacing: 1px; margin-bottom: 10px; }
+    #math-question { font-size: 32px; font-weight: bold; margin: 10px 0 15px 0; color: #ffffff; }
+    #math-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 15px; }
+    .math-btn { background: #3498db; color: #fff; border: none; padding: 12px; font-size: 20px; font-weight: bold; border-radius: 8px; cursor: pointer; transition: transform 0.1s; }
+    .math-btn:active { transform: scale(0.95); background: #2980b9; }
+    #math-timer-text { font-size: 14px; color: #bdc3c7; }
+    #timer-bar-container { width: 100%; height: 8px; background: #34495e; border-radius: 4px; overflow: hidden; margin-bottom: 12px; }
+    #timer-bar { width: 100%; height: 100%; background: #2ecc71; transition: width 0.1s linear; }
+</style>
+
+<script>
+    // --- SINTETIZADOR DE ÁUDIO WEB (SEM ARQUIVOS EXTERNOS) ---
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    let audioCtx = null;
+
+    function initAudio() {
+        if (!audioCtx) {
+            audioCtx = new AudioContext();
+        }
+        if (audioCtx.state === 'suspended') {
+            audioCtx.resume();
+        }
+    }
+
+    // Aplausos e Torcida (Ruído filtrado com estouros simulando palmas)
+    function playCheerSound(duration = 1.5, pitchShift = 1) {
+        if (!audioCtx) return;
+        const bufferSize = audioCtx.sampleRate * duration;
+        const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+        const data = buffer.getChannelData(0);
+
+        for (let i = 0; i < bufferSize; i++) {
+            // Mistura de ruído branco com pulsos curtos para efeito de palmas individuais
+            let noise = Math.random() * 2 - 1;
+            let clapPulse = Math.pow(Math.random(), 30) * 12; 
+            data[i] = (noise * 0.2 + clapPulse * 0.8);
+        }
+
+        const noiseNode = audioCtx.createBufferSource();
+        noiseNode.buffer = buffer;
+
+        const filter = audioCtx.createBiquadFilter();
+        filter.type = 'bandpass';
+        filter.frequency.value = 1000 * pitchShift;
+        filter.Q.value = 0.8;
+
+        const gainNode = audioCtx.createGain();
+        gainNode.gain.setValueAtTime(0.01, audioCtx.currentTime);
+        gainNode.gain.linearRampToValueAtTime(0.4, audioCtx.currentTime + 0.2);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+
+        noiseNode.connect(filter);
+        filter.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+
+        noiseNode.start();
+    }
+
+    // Som de Decepção da Torcida ("Oooooh")
+    function playDisappointmentSound() {
+        if (!audioCtx) return;
+        
+        // Tom grave caindo (Voz de lamentação)
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sawtooth';
+
+        osc.frequency.setValueAtTime(220, audioCtx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(110, audioCtx.currentTime + 1.2);
+
+        gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.001, audioCtx.currentTime + 1.2);
+
+        // Ruído de fundo de "ahhh"
+        const bufferSize = audioCtx.sampleRate * 1.2;
+        const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) {
+            data[i] = Math.random() * 2 - 1;
+        }
+
+        const noise = audioCtx.createBufferSource();
+        noise.buffer = buffer;
+
+        const filter = audioCtx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(600, audioCtx.currentTime);
+        filter.frequency.linearRampToValueAtTime(200, audioCtx.currentTime + 1.2);
+
+        const noiseGain = audioCtx.createGain();
+        noiseGain.gain.setValueAtTime(0.25, audioCtx.currentTime);
+        noiseGain.gain.linearRampToValueAtTime(0.001, audioCtx.currentTime + 1.2);
+
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        noise.connect(filter);
+        filter.connect(noiseGain);
+        noiseGain.connect(audioCtx.destination);
+
+        osc.start();
+        noise.start();
+        osc.stop(audioCtx.currentTime + 1.2);
+        noise.stop(audioCtx.currentTime + 1.2);
+    }
+
+    // Música Rápida Alegre de Ponto + Gritos
+    function playGoalCelebration() {
+        if (!audioCtx) return;
+
+        // 1. Aplausos e Gritos Fortes de Fundo
+        playCheerSound(2.5, 1.3);
+
+        // 2. Vinheta Rápida e Alegre (Fanfarra)
+        const notes = [261.63, 329.63, 392.00, 523.25, 392.00, 523.25]; // C4, E4, G4, C5, G4, C5
+        const times = [0, 0.12, 0.24, 0.36, 0.55, 0.70];
+        const durations = [0.1, 0.1, 0.1, 0.18, 0.12, 0.5];
+
+        notes.forEach((freq, idx) => {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+
+            osc.type = 'triangle';
+            osc.frequency.value = freq;
+
+            const startTime = audioCtx.currentTime + times[idx];
+            const duration = durations[idx];
+
+            gain.gain.setValueAtTime(0.3, startTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            osc.start(startTime);
+            osc.stop(startTime + duration);
+        });
+    }
+
+    // --- CÓDIGO DO JOGO ---
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score');
+    const pointsEl = document.getElementById('points');
+    const instructionsEl = document.getElementById('instructions');
+    const possessionBar = document.getElementById('possession-bar');
+
+    const mathOverlay = document.getElementById('math-overlay');
+    const mathTitleEl = document.getElementById('math-title');
+    const mathQuestionEl = document.getElementById('math-question');
+    const mathOptionsEl = document.getElementById('math-options');
+    const mathTimerText = document.getElementById('math-timer-text');
+    const timerBar = document.getElementById('timer-bar');
+
+    let width, height;
+
+    function resize() {
+        width = canvas.width = canvas.clientWidth || window.innerWidth;
+        height = canvas.height = canvas.clientHeight || window.innerHeight;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    let passesInRound = 0;
+    let teamPoints = 0;
+    let gameOver = false;
+    let statusMessage = "";
+    let messageTimer = 0;
+
+    let confetti = [];
+    let celebrationTimer = 0;
+    let isHugging = false;
+
+    let possessionTimeLeft = 10.0;
+    let challengeReason = 'pass'; 
+
+    let isMathActive = false;
+    let mathCorrectAnswer = 0;
+    let mathTimeLeft = 5.0;
+    let mathInterval = null;
+    let pendingReceiverIndex = -1;
+
+    const blueTeam = [
+        { id: 0, x: 0, y: 0, baseY: 0, baseX: 0 },
+        { id: 1, x: 0, y: 0, baseY: 0, baseX: 0 },
+        { id: 2, x: 0, y: 0, baseY: 0, baseX: 0 },
+        { id: 3, x: 0, y: 0, baseY: 0, baseX: 0 },
+        { id: 4, x: 0, y: 0, baseY: 0, baseX: 0 }
+    ];
+
+    const redTeam = [
+        { id: 0, x: 0, y: 0 },
+        { id: 1, x: 0, y: 0 },
+        { id: 2, x: 0, y: 0 },
+        { id: 3, x: 0, y: 0 },
+        { id: 4, x: 0, y: 0 }
+    ];
+
+    const disc = {
+        x: 0, y: 0, size: 25, vx: 0, vy: 0, pz: 0, vz: 0, active: false, 
+        holder: 0, lastPasser: -1,
+        resetToHolder: function() {
+            const holderPlayer = blueTeam[this.holder];
+            this.x = holderPlayer.x;
+            this.y = holderPlayer.y;
+            this.size = Math.max(16, 32 - (height - this.y) * 0.02);
+            this.vx = 0; this.vy = 0; this.pz = 0; this.vz = 0;
+            this.active = false;
+            possessionTimeLeft = 10.0;
+        }
+    };
+
+    function setupPositions() {
+        blueTeam[0].baseY = height * 0.82; blueTeam[0].baseX = width * 0.50;
+        blueTeam[1].baseY = height * 0.62; blueTeam[1].baseX = width * 0.20;
+        blueTeam[2].baseY = height * 0.62; blueTeam[2].baseX = width * 0.80;
+        blueTeam[3].baseY = height * 0.45; blueTeam[3].baseX = width * 0.35;
+        blueTeam[4].baseY = height * 0.45; blueTeam[4].baseX = width * 0.65;
+
+        for (let b of blueTeam) { b.x = b.baseX; b.y = b.baseY; }
+
+        redTeam[0].y = height * 0.72; redTeam[0].x = width * 0.35;
+        redTeam[1].y = height * 0.72; redTeam[1].x = width * 0.65;
+        redTeam[2].y = height * 0.52; redTeam[2].x = width * 0.50;
+        redTeam[3].y = height * 0.38; redTeam[3].x = width * 0.25;
+        redTeam[4].y = height * 0.75; redTeam[4].x = width * 0.75;
+
+        disc.holder = 0;
+        disc.lastPasser = -1;
+        disc.resetToHolder();
+        isHugging = false;
+        isMathActive = false;
+        mathOverlay.style.display = 'none';
+    }
+
+    setupPositions();
+
+    let startX = 0, startY = 0, startTime = 0;
+
+    canvas.addEventListener('touchstart', (e) => {
+        initAudio();
+        if (disc.active || gameOver || isHugging || isMathActive) return;
+        const touch = e.touches[0];
+        startX = touch.clientX; startY = touch.clientY; startTime = Date.now();
+    });
+
+    canvas.addEventListener('touchend', (e) => {
+        if (disc.active || gameOver || isHugging || isMathActive) return;
+        const touch = e.changedTouches[0];
+        const duration = Math.max(0.08, (Date.now() - startTime) / 1000);
+        const deltaY = touch.clientY - startY;
+        const deltaX = touch.clientX - startX;
+
+        const dist = Math.hypot(deltaX, deltaY);
+
+        if (dist > 15) {
+            const speed = Math.min(dist / duration / 22, 18);
+            const angle = Math.atan2(deltaY, deltaX);
+
+            disc.vx = Math.cos(angle) * speed;
+            disc.vy = Math.sin(angle) * speed;
+            disc.vz = Math.max(4, speed * 0.5);
+            disc.active = true;
+            instructionsEl.style.display = 'none';
+        }
+    });
+
+    function triggerMathChallenge(reason, receiverIndex = -1) {
+        isMathActive = true;
+        challengeReason = reason;
+        pendingReceiverIndex = receiverIndex;
+        mathTimeLeft = 5.0;
+
+        if (reason === 'delay') {
+            mathTitleEl.innerText = "DEMOROU PARA PASSAR! ACERTE PARA CONTINUAR";
+        } else {
+            mathTitleEl.innerText = "ACERTE A TABUADA PARA RECEBER!";
+        }
+
+        const num1 = Math.floor(Math.random() * 8) + 2;
+        const num2 = Math.floor(Math.random() * 8) + 2;
+        mathCorrectAnswer = num1 * num2;
+
+        mathQuestionEl.innerText = `${num1} × ${num2} = ?`;
+
+        let options = [mathCorrectAnswer];
+        while (options.length < 4) {
+            let wrong = mathCorrectAnswer + (Math.floor(Math.random() * 7) - 3) * 2;
+            if (wrong > 0 && !options.includes(wrong)) {
+                options.push(wrong);
+            }
+        }
+        options.sort(() => Math.random() - 0.5);
+
+        mathOptionsEl.innerHTML = '';
+        options.forEach(opt => {
+            const btn = document.createElement('button');
+            btn.className = 'math-btn';
+            btn.innerText = opt;
+            btn.onclick = () => checkMathAnswer(opt);
+            mathOptionsEl.appendChild(btn);
+        });
+
+        mathOverlay.style.display = 'flex';
+
+        clearInterval(mathInterval);
+        mathInterval = setInterval(() => {
+            mathTimeLeft -= 0.1;
+            if (mathTimeLeft <= 0) {
+                mathTimeLeft = 0;
+                clearInterval(mathInterval);
+                checkMathAnswer(null);
+            }
+            mathTimerText.innerText = `Tempo: ${mathTimeLeft.toFixed(1)}s`;
+            timerBar.style.width = `${(mathTimeLeft / 5.0) * 100}%`;
+        }, 100);
+    }
+
+    function checkMathAnswer(selected) {
+        clearInterval(mathInterval);
+        mathOverlay.style.display = 'none';
+        isMathActive = false;
+
+        if (selected === mathCorrectAnswer) {
+            // SOM DE APLAUSOS DA TORCIDA AO ACERTAR A TABUADA
+            playCheerSound(1.2);
+
+            if (challengeReason === 'pass') {
+                passesInRound++;
+                scoreEl.innerText = `Passes: ${passesInRound}/10`;
+                disc.lastPasser = disc.holder;
+                disc.holder = pendingReceiverIndex;
+                disc.resetToHolder();
+
+                if (passesInRound >= 10) {
+                    triggerCelebration();
+                } else {
+                    showMessage("Acertou! Passe Completo! 🥏");
+                }
+            } else if (challengeReason === 'delay') {
+                possessionTimeLeft = 10.0;
+                showMessage("Uf! Acertou a tempo. Passe o disco! 🥏");
+            }
+        } else {
+            // SOM DE DECEPÇÃO DA TORCIDA AO ERRAR
+            playDisappointmentSound();
+            endGame(selected === null ? "Tempo esgotado no desafio!" : "Errou o cálculo da tabuada!");
+        }
+    }
+
+    function triggerCelebration() {
+        teamPoints++;
+        passesInRound = 0;
+        pointsEl.innerText = `Pontos: ${teamPoints}`;
+        scoreEl.innerText = `Passes: 0/10`;
+        showMessage("PONTO! 🎉 Abraço de Comemoração!");
+        celebrationTimer = 150;
+        isHugging = true;
+
+        // MUSICA RAPIDA E ALEGRE + GRITOS E APLAUSOS
+        playGoalCelebration();
+
+        confetti = [];
+        for (let i = 0; i < 90; i++) {
+            confetti.push({
+                x: Math.random() * width,
+                y: Math.random() * height * 0.3,
+                vx: (Math.random() - 0.5) * 4,
+                vy: Math.random() * 3 + 2,
+                color: ['#f1c40f', '#e74c3c', '#2ecc71', '#9b59b6', '#3498db'][Math.floor(Math.random() * 5)],
+                size: Math.random() * 6 + 4
+            });
+        }
+    }
+
+    function update() {
+        if (gameOver || isMathActive) return;
+
+        if (isHugging) {
+            const hugCenterX = width * 0.5;
+            const hugCenterY = height * 0.6;
+
+            blueTeam.forEach((p, idx) => {
+                const offsetX = (idx - 2) * 8;
+                p.x += (hugCenterX + offsetX - p.x) * 0.08;
+                p.y += (hugCenterY - p.y) * 0.08;
+            });
+
+            celebrationTimer--;
+            for (let p of confetti) { p.x += p.vx; p.y += p.vy; }
+
+            if (celebrationTimer <= 0) {
+                setupPositions();
+            }
+            return;
+        }
+
+        if (!disc.active) {
+            possessionTimeLeft -= 0.016;
+            if (possessionTimeLeft <= 0) {
+                possessionTimeLeft = 0;
+                triggerMathChallenge('delay');
+                return;
+            }
+            possessionBar.style.width = `${(possessionTimeLeft / 10.0) * 100}%`;
+        }
+
+        const time = Date.now() * 0.0012;
+        blueTeam[1].x = blueTeam[1].baseX + Math.sin(time) * 25;
+        blueTeam[2].x = blueTeam[2].baseX + Math.sin(time + 2) * 25;
+        blueTeam[3].x = blueTeam[3].baseX + Math.cos(time * 0.8) * 20;
+        blueTeam[4].x = blueTeam[4].baseX + Math.sin(time * 0.8) * 20;
+
+        redTeam[0].x = width * 0.35 + Math.cos(time) * 30;
+        redTeam[1].x = width * 0.65 + Math.cos(time + 1) * 30;
+        redTeam[2].x = width * 0.50 + Math.sin(time * 1.2) * 35;
+        redTeam[3].x = width * 0.25 + Math.sin(time * 0.9) * 25;
+        redTeam[4].x = width * 0.75 + Math.cos(time * 0.9) * 25;
+
+        if (disc.active) {
+            disc.x += disc.vx;
+            disc.y += disc.vy;
+            disc.pz += disc.vz;
+            disc.vz -= 0.3;
+            disc.size = Math.max(14, 32 - (height - disc.y) * 0.02);
+
+            for (let red of redTeam) {
+                const dx = Math.abs(disc.x - red.x);
+                const dy = Math.abs(disc.y - red.y);
+                if (dx < 22 && dy < 20 && disc.pz < 35) {
+                    playDisappointmentSound();
+                    endGame("Interceptado pelo Time Vermelho!");
+                    return;
+                }
+            }
+
+            for (let i = 0; i < blueTeam.length; i++) {
+                if (i === disc.holder) continue;
+                const blue = blueTeam[i];
+                const dx = Math.abs(disc.x - blue.x);
+                const dy = Math.abs(disc.y - blue.y);
+
+                if (dx < 55 && dy < 45) {
+                    if (i === disc.lastPasser) {
+                        playDisappointmentSound();
+                        endGame("Falta! Não pode devolver o passe direto!");
+                        return;
+                    }
+
+                    triggerMathChallenge('pass', i);
+                    return;
+                }
+            }
+
+            if (disc.pz <= 0 && (Math.abs(disc.vy) < 0.5 || disc.vz < 0)) {
+                playDisappointmentSound();
+                endGame("O disco caiu na areia!");
+            }
+
+            if (disc.y < -50 || disc.y > height + 50 || disc.x < -50 || disc.x > width + 50) {
+                playDisappointmentSound();
+                endGame("Lançamento fora do campo!");
+            }
+        }
+
+        if (messageTimer > 0) messageTimer--;
+    }
+
+    function showMessage(msg) {
+        statusMessage = msg;
+        messageTimer = 60;
+    }
+
+    function endGame(reason) {
+        gameOver = true;
+        statusMessage = reason;
+        clearInterval(mathInterval);
+        mathOverlay.style.display = 'none';
+    }
+
+    function drawPlayer(p, color, isHolder, isBlocked) {
+        const px = p.x, py = p.y;
+
+        if (isHolder) {
+            ctx.beginPath();
+            ctx.ellipse(px, py + 12, 22, 10, 0, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+            ctx.fill();
+        }
+
+        if (isBlocked && !disc.active) {
+            ctx.strokeStyle = '#e74c3c';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(px - 10, py - 35); ctx.lineTo(px + 10, py - 15);
+            ctx.moveTo(px + 10, py - 35); ctx.lineTo(px - 10, py - 15);
+            ctx.stroke();
+        }
+
+        ctx.beginPath();
+        ctx.arc(px, py - 28, 8, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffdbac';
+        ctx.fill();
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.fillStyle = color;
+        ctx.fillRect(px - 9, py - 20, 18, 20);
+
+        ctx.fillStyle = '#333';
+        ctx.fillRect(px - 9, py, 18, 10);
+
+        ctx.strokeStyle = '#ffdbac';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(px - 9, py - 18); ctx.lineTo(px - 15, py - 5);
+        ctx.moveTo(px + 9, py - 18); ctx.lineTo(px + 15, py - 5);
+        ctx.stroke();
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, width, height);
+
+        for (let red of redTeam) {
+            drawPlayer(red, '#e74c3c', false, false);
+        }
+
+        for (let i = 0; i < blueTeam.length; i++) {
+            const isBlocked = (i === disc.lastPasser);
+            drawPlayer(blueTeam[i], '#2980b9', i === disc.holder && !disc.active, isBlocked);
+        }
+
+        if (disc.active) {
+            ctx.beginPath();
+            ctx.ellipse(disc.x, disc.y + 8, disc.size / 2, disc.size / 4, 0, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+            ctx.fill();
+        }
+
+        if (!isHugging || disc.active) {
+            const renderY = disc.y - Math.max(0, disc.pz);
+            ctx.beginPath();
+            ctx.ellipse(disc.x, renderY, disc.size, disc.size * 0.4, 0, 0, Math.PI * 2);
+            ctx.fillStyle = '#f1c40f';
+            ctx.fill();
+            ctx.lineWidth = 1.5;
+            ctx.strokeStyle = '#d35400';
+            ctx.stroke();
+        }
+
+        if (isHugging || celebrationTimer > 0) {
+            for (let p of confetti) {
+                ctx.fillStyle = p.color;
+                ctx.fillRect(p.x, p.y, p.size, p.size);
+            }
+        }
+
+        if (messageTimer > 0 && !gameOver) {
+            ctx.fillStyle = isHugging ? '#f1c40f' : '#fff'; 
+            ctx.font = 'bold 18px sans-serif'; 
+            ctx.textAlign = 'center';
+            ctx.fillText(statusMessage, width / 2, height * 0.20);
+        }
+
+        if (gameOver) {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.82)';
+            ctx.fillRect(0, 0, width, height);
+
+            ctx.fillStyle = '#e74c3c';
+            ctx.font = 'bold 26px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('Fim de Jogo!', width / 2, height / 2 - 50);
+
+            ctx.fillStyle = '#fff';
+            ctx.font = '18px sans-serif';
+            ctx.fillText(statusMessage, width / 2, height / 2 - 10);
+            ctx.fillText(`Pontos Conquistados: ${teamPoints}`, width / 2, height / 2 + 25);
+            ctx.fillText(`Passes na rodada: ${passesInRound}/10`, width / 2, height / 2 + 55);
+
+            ctx.font = '15px sans-serif';
+            ctx.fillStyle = '#f1c40f';
+            ctx.fillText('Toque para reiniciar a partida', width / 2, height / 2 + 100);
+        }
+    }
+
+    canvas.addEventListener('click', () => {
+        initAudio();
+        if (gameOver) {
+            passesInRound = 0;
+            teamPoints = 0;
+            gameOver = false;
+            pointsEl.innerText = `Pontos: 0`;
+            scoreEl.innerText = `Passes: 0/10`;
+            instructionsEl.style.display = 'block';
+            setupPositions();
+        }
+    });
+
+    function loop() { update(); draw(); requestAnimationFrame(loop); }
+    loop();
+</script>
